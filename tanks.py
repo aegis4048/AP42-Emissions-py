@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from fuzzywuzzy import process
+from itertools import combinations
 
 import constants
 
@@ -8,11 +10,12 @@ GEO_DATA = pd.read_pickle("Table 7-1-7 Meteorological data for selected US locat
 PAINT_DATA = pd.read_pickle("Table 7-1-6 Paint solar absortance.pkl")
 R = constants.R
 STATE_DICT = constants.state_dict
+TIMEFRAMES = constants.timeframes
 
 
 class Tank(object):
 
-    def __init__(self, H, D,
+    def __init__(self, H, D, loc, 
                  Rrd=1,
                  Sr=0.0625,
                  Fl=0.5,
@@ -22,6 +25,7 @@ class Tank(object):
                  spc='average',
                  rc=None,
                  rpc=None,
+                 timeframe=None,
                  ):
 
         self._validate_Fl(Fl)
@@ -64,7 +68,11 @@ class Tank(object):
         self.Hl = self.H * self.Fl  # liquid height, ft, assumed to be 50% by default  [not sure for horiz vs vert]
         self.Rs = self.D / 2  # tank shell radius, ft [not sure which tg]
 
-        self.Taa = GEO_DATA
+        self.loc_geodata = self._validate_location(loc)  # (dataframe) Table 7-1-7: Meteorological data for the select US location.
+        if timeframe is None:
+            self.timeframe = 'Annual'
+        else:
+            self.timeframe = self._validate_timeframe(timeframe)
 
         if tg == 'vertical cylinder':
 
@@ -141,10 +149,98 @@ class Tank(object):
 
         return rt.lower()
 
+    def _validate_location(self, loc):
+        # Normalize the input location to uppercase
+        input_normalized = loc.upper()
+
+        # Initialize variables to store matched state info
+        matched_state_abbr = None
+        matched_state_name = None
+
+        # Check if the normalized input is a state abbreviation
+        if input_normalized in STATE_DICT:
+            matched_state_abbr = input_normalized
+            matched_state_name = STATE_DICT[input_normalized]
+
+        # Generate combinations of input parts to match multi-word state names
+        if not matched_state_name:
+            input_parts = input_normalized.split()
+            for i in range(1, len(input_parts) + 1):
+                for combo in combinations(input_parts, i):
+                    test_str = ' '.join(combo)
+                    if test_str in STATE_DICT.values():
+                        matched_state_name = test_str
+                        matched_state_abbr = [abbr for abbr, name in STATE_DICT.items() if name == test_str][0]
+                        break
+                if matched_state_name:
+                    break
+
+        # Check if input is an exact match for any location
+        if input_normalized in GEO_DATA['Location'].str.upper().tolist():
+            loc = ' '.join(
+                [s.capitalize() for s in loc.split(' ')[:-1]] + [loc.split(' ')[-1].upper()])
+
+            location_GEODATA = GEO_DATA[GEO_DATA['Location'] == loc]
+            return location_GEODATA
+
+        elif matched_state_abbr:
+            locations_in_state = GEO_DATA[GEO_DATA['State'].str.upper() == matched_state_abbr]['Location'].unique()
+            if locations_in_state.size > 0:
+                locations_list_str = ', '.join(f"'{location}'" for location in locations_in_state)
+                raise TypeError(
+                    f"State name/abbreviation '{loc}' -> '{matched_state_abbr}' detected. Full state name is '{matched_state_name}'. List of accepted location parameters for '{matched_state_name}': {locations_list_str}")
+            else:
+                raise TypeError(f"No data available for the state '{matched_state_name}'.")
+        else:
+            # Fuzzy matching to suggest the closest match
+            locations = set(GEO_DATA['Location'].str.upper())
+            closest_match, score = process.extractOne(input_normalized, locations)
+
+            if score > 90:
+                # Split the closest match into city and state, and format them correctly
+                suggested_city, suggested_state = closest_match.rsplit(',', 1)
+                suggested_city = suggested_city.strip().title()  # City in title case
+                suggested_state = suggested_state.strip().upper()  # State in uppercase
+                suggested_closest_match = f"{suggested_city}, {suggested_state}"
+                raise TypeError(
+                    f"Invalid location parameter: '{loc}'. Did you mean '{suggested_closest_match}'?")
+            else:
+                raise TypeError(
+                    f"Invalid location parameter: '{loc}'. To view the list of available locations, run: Tank.get_locations_list()")
+
+    def _validate_timeframe(self, tf_input):
+        # Normalize the user input
+        # Normalize the user input
+        if isinstance(tf_input, str):
+            normalized_input = tf_input.capitalize()
+        elif isinstance(tf_input, int):
+            if tf_input > 12:
+                raise ValueError(
+                    "Invalid input: The number exceeds 12. There are only 12 months in a year plus 0 for 'Annual'.")
+            normalized_input = tf_input
+        else:
+            raise ValueError("Invalid input type")
+
+        # Search for the corresponding timeframe
+        for period in TIMEFRAMES:
+            if normalized_input in period:
+                return period[0]  # Return the true timeframe
+
+        if isinstance(tf_input, str):
+            raise ValueError(
+                "Timeframe not found, check for a typo. Examples of accepted string inputs: 'Sep', 'September', 'Feb', 'February', 'Dec', 'December'.... Alternatively, pass integer inputs [0, 12]. Ex: 0='Annual', 1='Jan', 12='Dec'.")
+
+        raise ValueError("Timeframe not found.")
+
     def _is_string(self, item):
         if not isinstance(item, str):
             raise TypeError("The arugment type must be a string")
 
+    @staticmethod
+    def get_locations_list():
+        return list(set(GEO_DATA['Location']))
 
-a = Tank(30, 15, Rrd=1, Sr=0.0625, Fl=0.5, tg='vertical cylinder', rt='dome', rc='black')
 
+a = Tank(30, 15, loc='Evansville, IN', Rrd=1, Sr=0.0625, Fl=0.5, tg='vertical cylinder', rt='dome', rc='black',
+         timeframe='Feb')
+print(a.timeframe)
